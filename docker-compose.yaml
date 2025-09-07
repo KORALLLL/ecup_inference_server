@@ -2,7 +2,9 @@ version: "3.9"
 
 services:
   triton:
-    image: nvcr.io/nvidia/tritonserver:${TRITON_IMAGE_TAG:-24.08-py3}
+    build:
+        context: .
+        dockerfile: Dockerfile.triton
     command: ["tritonserver", "--model-repository=/models", "--log-verbose=1"]
     environment:
       - CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES}
@@ -15,6 +17,6 @@ services:
         reservations:
           devices:
             - capabilities: ["gpu"]
-    # Для локального репозитория раскомментируйте volumes и выставьте MODEL_REPOSITORY=/models в .env
     volumes:
       - ${TRITON_REPO_PATH}:/models:ro
+      - ${WEIGHTS_PATH}:/weights:ro

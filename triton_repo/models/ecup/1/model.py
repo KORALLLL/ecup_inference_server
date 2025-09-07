@@ -1,9 +1,15 @@
-import torch, os
-import torch.nn as nn
+# models/ecup_py/1/model.py
+import os, json
+import numpy as np
+import torch
 import torch.nn.functional as F
+from transformers import AutoModel
+import triton_python_backend_utils as pb_utils
+
+
+import torch.nn as nn
 from hyper_connections import HyperConnections
 from einops import rearrange, repeat
-from transformers import AutoModel
 
 
 def mean_pool(last_hidden_state, attention_mask):
@@ -328,3 +334,100 @@ class CombinedClassifier(nn.Module):
         logits = self.classifier(fused).squeeze(-1)
         probs = torch.sigmoid(logits)
         return probs
+
+
+class TritonPythonModel:
+    def initialize(self, args):
+        ckpt_path = "/weights/8000_bert_ftt_imma_BEST.pt"
+        bge_name  = "/weights/models--BAAI--bge-m3/snapshots/5617a9f61b028005a4858fdac845db406aefb181"
+
+        ckpt = torch.load(ckpt_path, map_location="cpu")
+        self.CAT_COLS = ckpt.get("cat_cols", [])
+        self.NUM_COLS = ckpt.get("num_cols", [])
+        self.has_categ = len(self.CAT_COLS) > 0
+
+        self.model = CombinedClassifier(ckpt=ckpt, bge_model_name=bge_name)
+        self.model.eval().to("cuda")
+        torch.set_grad_enabled(False)
+        # if os.getenv("USE_FP16", "1") == "1":
+        #     self.model.half()
+
+        self.expect_x_categ = self.has_categ
+
+    def _as_torch(self, np_arr, dtype, device):
+        t = torch.as_tensor(np_arr, device=device)
+        return t if dtype is None else t.to(dtype)
+
+    def execute(self, requests):
+        # Собираем батч из запросов
+        E5_IDS, E5_MASK, N_IDS, N_MASK, D_IDS, D_MASK, X_CAT, X_NUM = [], [], [], [], [], [], [], []
+        slices = []
+        total = 0
+        for req in requests:
+            def get(name):
+                t = pb_utils.get_input_tensor_by_name(req, name)
+                return None if t is None else t.as_numpy()
+
+            e5_ids  = get("e5_input_ids");            e5_mask  = get("e5_attention_mask")
+            n_ids   = get("bge_name_input_ids");      n_mask   = get("bge_name_attention_mask")
+            d_ids   = get("bge_desc_input_ids");      d_mask   = get("bge_desc_attention_mask")
+            x_num   = get("x_numer")
+            x_cat   = get("x_categ")
+
+            B = int(e5_ids.shape[0])
+            E5_IDS.append(e5_ids); E5_MASK.append(e5_mask)
+            N_IDS.append(n_ids);   N_MASK.append(n_mask)
+            D_IDS.append(d_ids);   D_MASK.append(d_mask)
+            X_NUM.append(x_num)
+
+            if self.expect_x_categ:
+                if x_cat is None:
+                    raise pb_utils.TritonModelException("x_categ required but not provided")
+                X_CAT.append(x_cat)
+            else:
+                X_CAT.append(np.zeros((B, 0), dtype=np.int64))
+
+            slices.append((total, total + B))
+            total += B
+
+        # Конкатенация
+        e5_ids  = np.concatenate(E5_IDS, axis=0)
+        e5_mask = np.concatenate(E5_MASK, axis=0)
+        n_ids   = np.concatenate(N_IDS,  axis=0)
+        n_mask  = np.concatenate(N_MASK, axis=0)
+        d_ids   = np.concatenate(D_IDS,  axis=0)
+        d_mask  = np.concatenate(D_MASK, axis=0)
+        x_num   = np.concatenate(X_NUM,  axis=0)
+        x_cat   = np.concatenate(X_CAT,  axis=0)
+
+        # Перенос на GPU
+        use_fp16 = next(self.model.parameters()).dtype == torch.float16
+        tfloat = torch.float16 if use_fp16 else torch.float32
+
+        e5_ids_t  = self._as_torch(e5_ids,  torch.int64,  "cuda")
+        e5_mask_t = self._as_torch(e5_mask, torch.int64,  "cuda")
+        n_ids_t   = self._as_torch(n_ids,   torch.int64,  "cuda")
+        n_mask_t  = self._as_torch(n_mask,  torch.int64,  "cuda")
+        d_ids_t   = self._as_torch(d_ids,   torch.int64,  "cuda")
+        d_mask_t  = self._as_torch(d_mask,  torch.int64,  "cuda")
+        x_cat_t   = self._as_torch(x_cat,   torch.int64,  "cuda")
+        x_num_t   = self._as_torch(x_num,   tfloat,       "cuda")
+
+        # Инференс
+        with torch.inference_mode():
+            probs = self.model(
+                e5_input_ids=e5_ids_t, e5_attention_mask=e5_mask_t,
+                bge_name_input_ids=n_ids_t, bge_name_attention_mask=n_mask_t,
+                bge_desc_input_ids=d_ids_t, bge_desc_attention_mask=d_mask_t,
+                x_categ=x_cat_t, x_numer=x_num_t
+            ).float().unsqueeze(-1).contiguous().cpu().numpy()
+
+        # Возвращаем столько же ответов, сколько запросов
+        responses = []
+        for s, e in slices:
+            out = pb_utils.Tensor("probs", probs[s:e])  # [b,1]
+            responses.append(pb_utils.InferenceResponse(output_tensors=[out]))
+        return responses
+
+    def finalize(self):
+        pass

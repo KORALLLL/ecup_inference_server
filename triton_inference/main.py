@@ -1,27 +1,29 @@
-import os, io
+import os, io, time
 import numpy as np
 import pandas as pd
 from fastapi import FastAPI, UploadFile, File
+from tqdm import tqdm
 from transformers import AutoTokenizer
 import tritonclient.grpc as grpcclient
 import tritonclient.http as httpclient
 
-TRITON_URL = os.getenv("TRITON_URL", "0.0.0.0:8001")
-TRITON_PROTOCOL = os.getenv("TRITON_PROTOCOL", "http")  # grpc|http
-MODEL_NAME = os.getenv("MODEL_NAME", "ecup_model")
-MAX_LEN_E5 = int(os.getenv("MAX_LEN_E5", "512"))
-MAX_LEN_BGE = int(os.getenv("MAX_LEN_BGE", "512"))
+
+TRITON_URL = os.getenv("TRITON_URL")
+TRITON_PROTOCOL = os.getenv("TRITON_PROTOCOL")  # grpc|http
+MODEL_NAME = os.getenv("TRITON_MODEL_NAME")
+MAX_LEN_E5 = int(os.getenv("MAX_LEN_E5"))
+MAX_LEN_BGE = int(os.getenv("MAX_LEN_BGE"))
 
 # Два разных токенайзера
-E5_NAME = os.getenv("E5_NAME", "intfloat/multilingual-e5-small")
-BGE_NAME = os.getenv("BGE_NAME", "BAAI/bge-m3")
+E5_NAME = os.getenv("E5_NAME")
+BGE_NAME = os.getenv("BGE_NAME")
 CACHE_PATH = os.getenv("CACHE_PATH")
 e5_tok = AutoTokenizer.from_pretrained(E5_NAME, cache_path=CACHE_PATH)
 bge_tok = AutoTokenizer.from_pretrained(BGE_NAME, cache_path=CACHE_PATH)
 
 # Метаданные табличных фич (загрузите ваши артефакты)
 import torch
-CKPT_PATH = os.getenv("WEIGHTS_PATH", "/app/checkpoints/model_ckpt.pt")
+CKPT_PATH = os.getenv("WEIGHTS_FILE")
 ckpt = torch.load(CKPT_PATH, map_location="cpu")
 CAT_COLS = ckpt["cat_cols"]
 NUM_COLS = ckpt["num_cols"]
@@ -59,6 +61,7 @@ app = FastAPI(title="Unified E5+BGE Classifier via Triton")
 @app.post("/predict")
 async def predict(file: UploadFile = File(...), batch_size: int = 64, save_submission: bool = True):
     raw = await file.read()
+    start = time.time()
     df = pd.read_csv(io.BytesIO(raw))
     if "id" not in df.columns:
         return {"error": 'CSV must contain "id" column'}
@@ -87,7 +90,7 @@ async def predict(file: UploadFile = File(...), batch_size: int = 64, save_submi
     client = get_client()
     all_probs = []
 
-    for i in range(0, len(df), batch_size):
+    for i in tqdm(range(0, len(df), batch_size)):
         sl = slice(i, i + batch_size)
         feeds = {
             "e5_input_ids": e5_enc["input_ids"][sl].astype(np.int64),
@@ -96,7 +99,6 @@ async def predict(file: UploadFile = File(...), batch_size: int = 64, save_submi
             "bge_name_attention_mask": name_enc["attention_mask"][sl].astype(np.int64),
             "bge_desc_input_ids": desc_enc["input_ids"][sl].astype(np.int64),
             "bge_desc_attention_mask": desc_enc["attention_mask"][sl].astype(np.int64),
-            "x_categ": Xc[sl].astype(np.int64),
             "x_numer": Xn[sl].astype(np.float32),
         }
 
@@ -126,8 +128,9 @@ async def predict(file: UploadFile = File(...), batch_size: int = 64, save_submi
     probs = np.concatenate(all_probs, axis=0).squeeze(-1)
     thr = float(ckpt.get("best_threshold", 0.5))
     preds = (probs >= thr).astype(int)
+    end = time.time()
 
-    resp = {"count": int(len(df)), "threshold": thr, "positives": int(preds.sum())}
+    resp = {"count": int(len(df)), "threshold": thr, "positives": int(preds.sum()), "time": end - start}
     if save_submission:
         subm = pd.DataFrame({"id": df["id"].astype(int).values, "prediction": preds.astype(int)})
         subm = subm.drop_duplicates("id", keep="first")
