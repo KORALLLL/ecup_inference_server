@@ -1,4 +1,4 @@
-import torch
+import torch, os
 import torch.nn as nn
 import torch.nn.functional as F
 from hyper_connections import HyperConnections
@@ -181,7 +181,7 @@ class E5PlusFTTClassifier(nn.Module):
         extra_dim: int = 0,
     ):
         super().__init__()
-        self.encoder = AutoModel.from_pretrained(model_name, cache_dir="weights/")
+        self.encoder = AutoModel.from_pretrained(model_name, cache_dir=os.getenv("CACHE_PATH"))
         text_hidden = self.encoder.config.hidden_size
 
         self.has_tabular = (len(cat_cardinalities) + num_continuous) > 0
@@ -278,7 +278,7 @@ class CombinedClassifier(nn.Module):
         self.dropout    = base.dropout
         self.classifier = base.classifier
 
-        self.bge_model = AutoModel.from_pretrained(bge_model_name, cache_dir="weights/")
+        self.bge_model = AutoModel.from_pretrained(bge_model_name, cache_dir=os.getenv("CACHE_PATH"))
         self.bge_dim = self.bge_model.config.hidden_size
 
         self.extra_dim = int(base.extra_dim)
