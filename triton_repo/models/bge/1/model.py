@@ -15,15 +15,17 @@ import torch.nn as nn
 import torch.nn.functional as F
 from FlagEmbedding import BGEM3FlagModel
 
-# ----- Triton Python Backend model for BGEM3FlagModel -----
 import numpy as np
-import triton_python_backend_utils as pb_utils  # Triton API [1]
+import triton_python_backend_utils as pb_utils
 
 torch.backends.cuda.enable_flash_sdp(True)
+
 
 class TritonPythonModel:
     def initialize(self, args):
         # Путь к модели BGE из env/по умолчанию
+        kind = args.get("model_instance_kind")
+        dev_id = args.get("model_instance_device_id")
         self.bge_path = os.getenv(
             "BGE_PATH",
             "/weights/models--BAAI--bge-m3/snapshots/5617a9f61b028005a4858fdac845db406aefb181"
@@ -33,8 +35,18 @@ class TritonPythonModel:
         self.max_length = int(os.getenv("MAX_LENGTH", "512"))
         self.batch_size = int(os.getenv("ENC_BATCH", "64"))
 
-        # Загрузка BGEM3FlagModel (токенизация внутри encode)
-        self.model = BGEM3FlagModel(self.bge_path, use_fp16=self.use_fp16)
+        if kind == "KIND_GPU" and (dev_id is not None) and torch.cuda.is_available():
+            dev_idx = int(dev_id)
+            torch.cuda.set_device(dev_idx)  # критично для multi-GPU инстансов
+            self.device = torch.device(f"cuda:{dev_idx}")
+        else:
+            self.device = torch.device("cpu")
+            self.use_fp16 = False
+
+        try:
+            self.model = BGEM3FlagModel(self.bge_path, use_fp16=self.use_fp16, device=self.device)
+        except TypeError:
+            self.model = BGEM3FlagModel(self.bge_path, use_fp16=self.use_fp16)
 
         # Тип выхода: FP16 или FP32
         self._out_dtype = np.float16
@@ -104,7 +116,6 @@ class TritonPythonModel:
         pass
 
 
-
 MAX_LEN_TEXT = 512
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
@@ -126,6 +137,7 @@ def compute_embeddings(bge_model: BGEM3FlagModel, texts, batch_size=64, max_leng
         outputs = bge_model.encode(texts, batch_size=batch_size, max_length=max_length)['dense_vecs']
     embeddings.extend(outputs)
     return embeddings
+
 
 def main():
     parser = argparse.ArgumentParser(description="Preprocess CSV, compute BGEM3 embeddings, and run inference with E5+FTT model")
@@ -156,7 +168,7 @@ def main():
     if 'name_rus' in df.columns:
         df['name_rus'] = df['name_rus'].progress_apply(clean_text)
 
-    processed_csv_path = outdir / f"test_processed.csv"
+    processed_csv_path = outdir / "test_processed.csv"
     df.to_csv(processed_csv_path, index=False)
     start = time.time()
     print("Loading BGEM3 model from:", args.bge_path)
@@ -170,7 +182,7 @@ def main():
     print("Encoding description...")
     desc_embeddings = compute_embeddings(bge_model, desc_texts, batch_size=args.embed_batch, max_length=args.embed_maxlen)
     end = time.time()
-    print(end-start)
+    print(end - start)
 
 
 if __name__ == '__main__':

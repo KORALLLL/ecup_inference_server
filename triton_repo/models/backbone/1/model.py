@@ -18,7 +18,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader
 
-# import triton_python_backend_utils as pb_utils
+import triton_python_backend_utils as pb_utils
 
 from transformers import AutoTokenizer, AutoModel
 from einops import rearrange, repeat
@@ -33,14 +33,14 @@ TEXT_COLS = ["brand_name", "name_rus", "description", "CommercialTypeName4"]
 E5_PREFIX = "passage: "
 
 NUMERIC_COLS_TO_ZERO = [
-    'rating_1_count','rating_2_count','rating_3_count','rating_4_count','rating_5_count',
-    'comments_published_count','photos_published_count','videos_published_count',
-    'ExemplarAcceptedCountTotal7','ExemplarAcceptedCountTotal30','ExemplarAcceptedCountTotal90',
-    'OrderAcceptedCountTotal7','OrderAcceptedCountTotal30','OrderAcceptedCountTotal90',
-    'ExemplarReturnedCountTotal7','ExemplarReturnedCountTotal30','ExemplarReturnedCountTotal90',
-    'ExemplarReturnedValueTotal7','ExemplarReturnedValueTotal30','ExemplarReturnedValueTotal90',
-    'ItemVarietyCount','ItemAvailableCount',
-    'GmvTotal7','GmvTotal30','GmvTotal90',
+    'rating_1_count', 'rating_2_count', 'rating_3_count', 'rating_4_count', 'rating_5_count',
+    'comments_published_count', 'photos_published_count', 'videos_published_count',
+    'ExemplarAcceptedCountTotal7', 'ExemplarAcceptedCountTotal30', 'ExemplarAcceptedCountTotal90',
+    'OrderAcceptedCountTotal7', 'OrderAcceptedCountTotal30', 'OrderAcceptedCountTotal90',
+    'ExemplarReturnedCountTotal7', 'ExemplarReturnedCountTotal30', 'ExemplarReturnedCountTotal90',
+    'ExemplarReturnedValueTotal7', 'ExemplarReturnedValueTotal30', 'ExemplarReturnedValueTotal90',
+    'ItemVarietyCount', 'ItemAvailableCount',
+    'GmvTotal7', 'GmvTotal30', 'GmvTotal90',
 ]
 
 
@@ -72,13 +72,14 @@ def mean_pool(last_hidden_state, attention_mask):
     counts = mask.sum(dim=1).clamp(min=1e-9)
     return summed / counts
 
+
 class GEGLU(nn.Module):
     def forward(self, x):
-        x, gates = x.chunk(2, dim = -1)
+        x, gates = x.chunk(2, dim=-1)
         return x * F.gelu(gates)
 
 
-def FeedForward(dim, mult = 4, dropout = 0.):
+def FeedForward(dim, mult=4, dropout=0.):
     return nn.Sequential(
         nn.LayerNorm(dim),
         nn.Linear(dim, dim * mult * 2),
@@ -89,7 +90,7 @@ def FeedForward(dim, mult = 4, dropout = 0.):
 
 
 class Attention(nn.Module):
-    def __init__(self, dim, heads = 8, dim_head = 64, dropout = 0.):
+    def __init__(self, dim, heads=8, dim_head = 64, dropout = 0.):
         super().__init__()
         inner_dim = dim_head * heads
         self.heads = heads
@@ -459,14 +460,23 @@ def predict_from_checkpoint(ckpt_path: str, df: pd.DataFrame, batch_size: int = 
     preds = (probs >= best_thr).astype(int)
     return probs, preds, best_thr
 
+
 class TritonPythonModel:
     def initialize(self, args):
-        # Читаем конфиг модели (для типов выходов)
+        dev_id = args.get("model_instance_device_id")
+        kind = args.get("model_instance_kind")
+
         self.model_config = json.loads(args["model_config"])
+
+        if kind == "KIND_GPU" and dev_id is not None and torch.cuda.is_available():
+            dev_idx = int(dev_id)
+            torch.cuda.set_device(dev_idx)                    
+            self.device = torch.device(f"cuda:{dev_idx}")
+        else:
+            self.device = torch.device("cpu")
         # Пути и флаги из окружения
         ckpt_path = os.getenv("CKPT_PATH", "/weights/8000_bert_ftt_imma_BEST.pt")
         use_fp16  = os.getenv("USE_FP16", "0") == "1"
-        device = "cuda" if torch.cuda.is_available() else "cpu"
 
         # Загружаем чекпойнт
         ckpt = torch.load(ckpt_path, map_location="cpu")
@@ -493,14 +503,14 @@ class TritonPythonModel:
             tab_out_dim=tab_hp.get("tab_out_dim", 256),
             dropout=tab_hp.get("dropout", 0.1),
             extra_dim=extra_dim,
-        ).to(device)
+        ).to(self.device)
+
         self.model.load_state_dict(ckpt["state_dict"], strict=True)
         self.model.eval()
         torch.set_grad_enabled(False)
-        if use_fp16 and device == "cuda":
+        if use_fp16:
             self.model.half()
 
-        self.device = device
         self.use_fp16 = use_fp16
 
     def _as_torch(self, np_arr, dtype, device):
@@ -542,7 +552,7 @@ class TritonPythonModel:
         x_extra = np.concatenate(X_EXTRA, axis=0)
 
         # Типы
-        use_fp16 = self.use_fp16 and (self.device == "cuda")
+        use_fp16 = self.use_fp16
         tfloat = torch.float16 if use_fp16 else torch.float32
 
         # На устройство
@@ -567,6 +577,7 @@ class TritonPythonModel:
 
     def finalize(self):
         pass
+
 
 def main():
     parser = argparse.ArgumentParser(description="Preprocess CSV, compute BGEM3 embeddings, and run inference with E5+FTT model")
