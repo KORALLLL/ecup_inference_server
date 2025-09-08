@@ -1,0 +1,47 @@
+name: "backbone"
+backend: "python"
+max_batch_size: 64
+
+input [
+  {
+    name: "e5_input_ids"
+    data_type: TYPE_INT64
+    dims: [ -1 ]          # [B, L]
+  },
+  {
+    name: "e5_attention_mask"
+    data_type: TYPE_INT64
+    dims: [ -1 ]          # [B, L]
+  },
+  {
+    name: "x_categ"
+    data_type: TYPE_INT64
+    dims: [ -1 ]          # [B, C] (может быть [B, 0] если нет категориальных)
+  },
+  {
+    name: "x_numer"
+    data_type: TYPE_FP32
+    dims: [ -1 ]          # [B, N] (может быть [B, 0] если нет числовых)
+  },
+  {
+    name: "x_extra"
+    data_type: TYPE_FP32
+    dims: [ -1 ]          # [B, E] (может быть [B, 0] если extra_dim=0)
+  }
+]
+
+output [
+  {
+    name: "probs"
+    data_type: TYPE_FP32
+    dims: [ 1 ]           # [B, 1]
+  }
+]
+
+instance_group [{ kind: KIND_GPU count:1}]
+
+dynamic_batching {
+  preferred_batch_size: [ 1,16,64 ]
+  max_queue_delay_microseconds: 100
+}
+

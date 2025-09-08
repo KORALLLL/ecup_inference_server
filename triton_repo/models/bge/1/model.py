@@ -37,7 +37,7 @@ class TritonPythonModel:
         self.model = BGEM3FlagModel(self.bge_path, use_fp16=self.use_fp16)
 
         # Тип выхода: FP16 или FP32
-        self._out_dtype = np.float16 if self.use_fp16 else np.float32
+        self._out_dtype = np.float16
 
     def execute(self, requests):
         # 1) Собираем тексты из всех запросов
