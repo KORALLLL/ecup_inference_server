@@ -12,6 +12,7 @@ from fastapi import FastAPI
 from pydantic import BaseModel
 from bs4 import BeautifulSoup
 from tqdm import tqdm
+tqdm.pandas()
 
 import tritonclient.grpc as grpcclient
 import tritonclient.http as httpclient
@@ -30,6 +31,8 @@ MODEL_NAME_PRED: str = os.getenv("TRITON_MODEL_NAME_PRED", "backbone")
 # Советы: max_batch_size и preferred_batch_size на стороне сервера задают динамическое батчирование [1]
 DEFAULT_BATCH = int(os.getenv("EMBED_BATCH", "256"))
 DEFAULT_MAXLEN = int(os.getenv("EMBED_MAXLEN", "512"))
+
+BEST_THRESHOLD = float(os.getenv("BEST_THRESHOLD", "0.63"))
 
 
 # -------------------------
@@ -83,12 +86,12 @@ def infer_texts(
             vecs = res.as_numpy("dense_vecs")
 
         # Triton config задаёт TYPE_FP32, получаем float32 [1]
-        all_out.append(vecs.astype(np.float16, copy=False))
+        all_out.append(vecs.astype(np.float32, copy=False))
 
     if not all_out:
         return np.zeros((0, 0), dtype=np.float16)
 
-    return np.concatenate(all_out, axis=0).astype(np.float16, copy=False)
+    return np.concatenate(all_out, axis=0).astype(np.float32, copy=False)
 
 
 # -------------------------
@@ -121,18 +124,16 @@ def encode_file(req: EncodeRequest):
         return {"error": 'CSV must contain "id" column'}
 
     # Тексты
-    name_col = "name_rus" if "name_rus" in df.columns else None
-    desc_col = "description" if "description" in df.columns else None
-    if name_col is None and desc_col is None:
-        return {"error": 'CSV must contain at least one of ["name_rus", "description"]'}
+    if 'description' in df.columns:
+        df['description'] = df['description'].progress_apply(clean_text)
+    if 'name_rus' in df.columns:
+        df['name_rus'] = df['name_rus'].progress_apply(clean_text)
 
-    if req.clean and name_col:
-        df[name_col] = df[name_col].fillna("").map(clean_text)
-    if req.clean and desc_col:
-        df[desc_col] = df[desc_col].fillna("").map(clean_text)
+    processed_csv_path = "test_processed.csv"
+    df.to_csv(processed_csv_path, index=False)
 
-    name_texts = df[name_col].fillna("").astype(str).tolist() if name_col else []
-    desc_texts = df[desc_col].fillna("").astype(str).tolist() if desc_col else []
+    name_texts = df["name_rus"].fillna("").astype(str).tolist()
+    desc_texts = df["description"].fillna("").astype(str).tolist()
 
     client = get_client()
 
@@ -262,6 +263,18 @@ class PredictRequest(BaseModel):
     clean: bool = True
 
 
+NUMERIC_COLS_TO_ZERO = [
+    'rating_1_count', 'rating_2_count', 'rating_3_count', 'rating_4_count', 'rating_5_count',
+    'comments_published_count', 'photos_published_count', 'videos_published_count',
+    'ExemplarAcceptedCountTotal7', 'ExemplarAcceptedCountTotal30', 'ExemplarAcceptedCountTotal90',
+    'OrderAcceptedCountTotal7', 'OrderAcceptedCountTotal30', 'OrderAcceptedCountTotal90',
+    'ExemplarReturnedCountTotal7', 'ExemplarReturnedCountTotal30', 'ExemplarReturnedCountTotal90',
+    'ExemplarReturnedValueTotal7', 'ExemplarReturnedValueTotal30', 'ExemplarReturnedValueTotal90',
+    'ItemVarietyCount', 'ItemAvailableCount',
+    'GmvTotal7', 'GmvTotal30', 'GmvTotal90',
+]
+
+
 @app.post("/predict_file")
 def predict_file(req: PredictRequest):
     """
@@ -283,12 +296,9 @@ def predict_file(req: PredictRequest):
     if "id" not in df.columns:
         return {"error": 'CSV must contain "id" column'}
 
-    # Опциональная очистка
-    for c in ["brand_name", "name_rus", "CommercialTypeName4", "description"]:
-        if c in df.columns and req.clean:
-            df[c] = df[c].fillna("").map(clean_text)
-        elif c in df.columns:
-            df[c] = df[c].fillna("").astype(str)
+    for col in NUMERIC_COLS_TO_ZERO:
+        if col in df.columns:
+            df[col] = df[col].replace(np.nan, 0.0, regex=True)
 
     # Строим тексты для E5
     texts_e5 = [build_text_block(r) for _, r in df.iterrows()]
@@ -300,10 +310,6 @@ def predict_file(req: PredictRequest):
     ids_pkl = data.get("ids", [])
     name_emb = np.asarray(data.get("name_embeddings", []), dtype=np.float32)
     desc_emb = np.asarray(data.get("description_embeddings", []), dtype=np.float32)
-
-    if len(ids_pkl) != len(df):
-        # Не строго обязательно, но полезно предупредить
-        pass
 
     # Готовим входы табличной части согласно чекпойнту
     # Загружаем чекпойнт (путь можно переопределить через переменную окружения PRED_CKPT_PATH)
@@ -358,13 +364,35 @@ def predict_file(req: PredictRequest):
     )  # [B]
 
     # Бинарные предикты по дефолтному порогу 0.5
-    preds = (probs >= 0.5).astype(np.int32)
+    preds = (probs >= BEST_THRESHOLD).astype(np.int32)
+
+    hi_thr = float(os.getenv("SELLER_HI_THR", "0.8"))
+    lo_thr = float(os.getenv("SELLER_LO_THR", "0.1"))
+
+    if "SellerID" in df.columns:
+        seller_pred_rate = (
+            pd.DataFrame({"SellerID": df["SellerID"].values, "prediction": preds})
+            .groupby("SellerID")["prediction"]
+            .mean()
+        )
+        sellers_to_one  = seller_pred_rate[seller_pred_rate > hi_thr].index
+        sellers_to_zero = seller_pred_rate[seller_pred_rate < lo_thr].index
+
+        mask_one  = df["SellerID"].isin(sellers_to_one).to_numpy()
+        mask_zero = df["SellerID"].isin(sellers_to_zero).to_numpy()
+
+        test_pred = preds.copy()
+        test_pred[mask_one]  = 1
+        test_pred[mask_zero] = 0
+    else:
+        # Нет SellerID — агрегация пропускается
+        pass
 
     # Сохранение результатов
     outdir = Path(req.outdir)
     outdir.mkdir(parents=True, exist_ok=True)
     pred_path = outdir / f"preds_{csv_path.stem}.csv"
-    pd.DataFrame({"id": df["id"].astype(int).values, "prob": probs.astype(np.float32), "pred": preds}).to_csv(pred_path, index=False)
+    pd.DataFrame({"id": df["id"].astype(int).values, "pred": test_pred}).to_csv(pred_path, index=False)
 
     t1 = time.time()
     return {
