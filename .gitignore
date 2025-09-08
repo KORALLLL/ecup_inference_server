@@ -4,6 +4,7 @@ __pycache__/
 *$py.class
 
 weights/
+sandbox/
 
 # C extensions
 *.so

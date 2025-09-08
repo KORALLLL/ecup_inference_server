@@ -4,7 +4,7 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 from transformers import AutoModel
-import triton_python_backend_utils as pb_utils
+# import triton_python_backend_utils as pb_utils
 
 
 import torch.nn as nn
@@ -412,7 +412,7 @@ class TritonPythonModel:
         d_mask_t  = self._as_torch(d_mask,  torch.int64,  "cuda")
         x_cat_t   = self._as_torch(x_cat,   torch.int64,  "cuda")
         x_num_t   = self._as_torch(x_num,   tfloat,       "cuda")
-
+        
         # Инференс
         with torch.inference_mode():
             probs = self.model(
@@ -431,3 +431,84 @@ class TritonPythonModel:
 
     def finalize(self):
         pass
+
+if __name__ == "__main__":
+    # Мини-тест CombinedClassifier на мок-данных torch.ones
+    import os
+    import torch
+    import numpy as np
+    from tqdm import tqdm
+
+    # Параметры из окружения с дефолтами
+    ckpt_path = os.getenv("CKPT_PATH", "/home/kirill/ecup_inference_server/weights/models_weights/8000_bert_ftt_imma_BEST.pt")
+    bge_name  = os.getenv("BGE_NAME", "/home/kirill/ecup_inference_server/weights/models_weights/models--BAAI--bge-m3/snapshots/5617a9f61b028005a4858fdac845db406aefb181")
+
+    B   = int(os.getenv("BATCH", "64"))            # размер батча
+    TE5 = int(os.getenv("E5_SEQ_LEN", "512"))     # длина e5
+    TN  = int(os.getenv("NAME_SEQ_LEN", "62"))    # длина name
+    TD  = int(os.getenv("DESC_SEQ_LEN", "512"))   # длина desc
+    use_fp16 = os.getenv("USE_FP16", "1") == "1"
+
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+
+    print(f"[MAIN] Loading ckpt from: {ckpt_path}")
+    ckpt = torch.load(ckpt_path, map_location="cpu")
+
+    # Из ckpt берём метаданные табличной части
+    cat_cards = ckpt.get("cat_cardinalities", [])
+    num_cols  = ckpt.get("num_cols", [])
+    C = len(cat_cards)
+    N = len(num_cols)
+
+    # Инициализация модели
+    print(f"[MAIN] Building model with BGE from: {bge_name}")
+    model = CombinedClassifier(ckpt=ckpt, bge_model_name=bge_name).to(device).eval()
+    torch.set_grad_enabled(False)
+    if use_fp16:
+        model.half()
+        print("[MAIN] Using FP16")
+
+    # Мок-данные: целые int64 для input_ids/mask, float для числовых
+    def ones_long(shape):
+        return torch.ones(shape, dtype=torch.long, device=device)
+    def ones_float(shape, dtype=torch.float32):
+        return torch.ones(shape, dtype=dtype, device=device)
+
+    # Входы текста
+    e5_input_ids       = ones_long((B, TE5))
+    e5_attention_mask  = ones_long((B, TE5))
+    bge_name_input_ids = ones_long((B, TN))
+    bge_name_attn      = ones_long((B, TN))
+    bge_desc_input_ids = ones_long((B, TD))
+    bge_desc_attn      = ones_long((B, TD))
+
+    # Табличные фичи
+    if C > 0:
+        # категориальные индексы начинаются с 0, mock=0 допустим
+        x_categ = torch.zeros((B, C), dtype=torch.long, device=device)
+    else:
+        x_categ = torch.zeros((B, 0), dtype=torch.long, device=device)
+
+    if use_fp16:
+        x_numer = ones_float((B, N), dtype=torch.float16) if N > 0 else torch.zeros((B, 0), dtype=torch.float16, device=device)
+    else:
+        x_numer = ones_float((B, N), dtype=torch.float32) if N > 0 else torch.zeros((B, 0), dtype=torch.float32, device=device)
+
+    # Прогон
+    with torch.inference_mode():
+        for i in tqdm(range(300)):
+            probs = model(
+                e5_input_ids=e5_input_ids,
+                e5_attention_mask=e5_attention_mask,
+                bge_name_input_ids=bge_name_input_ids,
+                bge_name_attention_mask=bge_name_attn,
+                bge_desc_input_ids=bge_desc_input_ids,
+                bge_desc_attention_mask=bge_desc_attn,
+                x_categ=x_categ,
+                x_numer=x_numer
+            )
+
+    # Вывод
+    probs_f32 = probs.float().detach().cpu().numpy()
+    print(f"[MAIN] probs shape: {probs_f32.shape}, dtype: {probs_f32.dtype}")
+    print(f"[MAIN] min={probs_f32.min():.6f}, max={probs_f32.max():.6f}, mean={probs_f32.mean():.6f}")
