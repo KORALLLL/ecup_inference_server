@@ -1,5 +1,7 @@
-import os
+import os,torch
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
+os.environ["HF_HUB_OFFLINE"] = "1"; os.environ["TRANSFORMERS_OFFLINE"] = "1"  # не ходить в сеть [6]
+torch.set_num_threads(1)
 
 import re
 import argparse
@@ -10,7 +12,6 @@ from tqdm.auto import tqdm
 
 tqdm.pandas()
 
-import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from FlagEmbedding import BGEM3FlagModel
@@ -43,10 +44,8 @@ class TritonPythonModel:
             self.device = torch.device("cpu")
             self.use_fp16 = False
 
-        try:
-            self.model = BGEM3FlagModel(self.bge_path, use_fp16=self.use_fp16, device=self.device)
-        except TypeError:
-            self.model = BGEM3FlagModel(self.bge_path, use_fp16=self.use_fp16)
+        self.model = BGEM3FlagModel(self.bge_path, use_fp16=self.use_fp16, device=self.device)
+
 
         # Тип выхода: FP16 или FP32
         self._out_dtype = np.float16

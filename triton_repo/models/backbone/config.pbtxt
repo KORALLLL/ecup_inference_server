@@ -42,7 +42,3 @@ instance_group [
   { kind: KIND_GPU, gpus: [0] }
 ]
 
-dynamic_batching {
-  preferred_batch_size: [ 1,16,64 ]
-}
-

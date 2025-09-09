@@ -22,6 +22,6 @@ class PredictRequest(BaseModel):
 class RunFullRequest(BaseModel):
     csv_path: str
     outdir: str = "."
-    batch: int = 256
-    e5_maxlen: int = 512
+    batch: int = DEFAULT_BATCH
+    e5_maxlen: int = DEFAULT_MAXLEN
     clean: bool = True
