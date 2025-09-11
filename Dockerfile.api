@@ -1,0 +1,14 @@
+FROM python:3.10-slim
+
+RUN pip install --no-cache-dir uv
+
+# Copy requirements for API and install
+COPY /requirements_api.txt /requirements_api.txt
+RUN uv pip install --system -r /requirements_api.txt
+
+# App
+WORKDIR /app
+COPY ./triton_inference /app
+
+EXPOSE 8001
+CMD ["python", "main.py"]

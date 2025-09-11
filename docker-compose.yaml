@@ -20,3 +20,25 @@ services:
     volumes:
       - ${TRITON_REPO_PATH}:/models:ro
       - ${WEIGHTS_PATH}:/weights:ro
+
+  api:
+    build:
+        context: .
+        dockerfile: Dockerfile.api
+    environment:
+      - TRITON_MODEL_NAME=${TRITON_MODEL_NAME}
+      - TRITON_MODEL_NAME_PRED=${MODEL_NAME_PRED}
+      - BEST_THRESHOLD=${BEST_THRESHOLD}
+      - EMBED_BATCH=${TRITON_MAX_BATCH}
+      - EMBED_MAXLEN=${MAX_LEN_E5}
+      - TRITON_PROTOCOL=${TRITON_PROTOCOL}
+      - TRITON_URL=${TRITON_URL}
+      - CACHE_PATH=${CACHE_PATH}
+      - E5_NAME=${E5_NAME}
+      - WEIGHTS_FILE=${CONTAINER_WEIGHTS}
+    ports:
+      - "8001:8001"
+    depends_on:
+      - triton
+    volumes:
+      - ${WEIGHTS_PATH}:/weights:ro

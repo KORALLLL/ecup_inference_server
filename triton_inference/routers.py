@@ -4,6 +4,10 @@ from pathlib import Path
 import pandas as pd, numpy as np
 import torch
 from fastapi import APIRouter
+from fastapi.responses import FileResponse
+from fastapi import APIRouter, File, UploadFile, Form, HTTPException
+from typing import Optional
+from tempfile import NamedTemporaryFile
 
 from schemas import EncodeRequest, PredictRequest, RunFullRequest
 from utils import clean_text, get_client, infer_texts, build_text_block, tokenize_e5_texts, infer_probs_classifier
@@ -178,26 +182,71 @@ def predict_file(req: PredictRequest):
 
 
 @router_var.post("/run_full")
-def run_full(req: RunFullRequest):
-    enc_req = EncodeRequest(csv_path=req.csv_path, outdir=req.outdir, batch=req.batch, clean=req.clean)
-    enc_res = encode_file(enc_req)
-    if isinstance(enc_res, dict) and "error" in enc_res:
-        return {"stage": "encode", **enc_res}
+async def run_full(
+    file: UploadFile = File(...),               # CSV загружается как form-data "file"
+    batch: Optional[int] = Form(None),
+    clean: Optional[bool] = Form(False),
+    e5_maxlen: Optional[int] = Form(None),
+    outdir: Optional[str] = Form(None)
+):
+    # 1) Валидация типа
+    if not file.filename.lower().endswith(".csv"):
+        raise HTTPException(status_code=400, detail="Expecting a .csv file")
 
-    csv_for_pred = enc_res.get("processed_csv_path", req.csv_path)
-    emb_pkl_path = enc_res["embeddings_path"]
+    # 2) Сохранить во временный CSV-файл, если нижележащие функции ждут путь
+    tmp_csv = NamedTemporaryFile(delete=False, suffix=".csv")
+    try:
+        contents = await file.read()
+        tmp_csv.write(contents)
+        tmp_csv.flush()
+        tmp_csv.close()
+    except Exception as e:
+        try:
+            tmp_csv.close()
+        except:
+            pass
+        if os.path.exists(tmp_csv.name):
+            os.remove(tmp_csv.name)
+        raise HTTPException(status_code=500, detail=f"Failed to read/save uploaded file: {e}")  # [2][12]
 
-    pred_req = PredictRequest(
-        csv_path=csv_for_pred,
-        emb_pkl_path=emb_pkl_path,
-        outdir=req.outdir,
-        batch=req.batch,
-        e5_maxlen=req.e5_maxlen,
-        clean=req.clean
-    )
-    pred_res = predict_file(pred_req)
+    try:
+        # 3) Вызов encode
+        enc_req = EncodeRequest(csv_path=tmp_csv.name, outdir=outdir, batch=batch, clean=clean)
+        enc_res = encode_file(enc_req)
+        if isinstance(enc_res, dict) and "error" in enc_res:
+            return {"stage": "encode", **enc_res}  # JSON об ошибке на стадии encode [15]
 
-    return {
-        "preds_path": pred_res["preds_path"],
-        "whole_time": enc_res.get("time_sec") + pred_res.get("time_sec")
-    }
+        csv_for_pred = enc_res.get("processed_csv_path", tmp_csv.name)
+        emb_pkl_path = enc_res["embeddings_path"]
+
+        # 4) Вызов predict
+        pred_req = PredictRequest(
+            csv_path=csv_for_pred,
+            emb_pkl_path=emb_pkl_path,
+            outdir=outdir,
+            batch=batch,
+            e5_maxlen=e5_maxlen,
+            clean=clean
+        )
+        pred_res = predict_file(pred_req)
+
+        preds_path = pred_res["preds_path"]
+        whole_time = (enc_res.get("time_sec") or 0) + (pred_res.get("time_sec") or 0)
+
+        # 5) Отдать файл как скачивание
+        # Если уже есть CSV-файл предиктов на диске:
+        base = os.path.splitext(os.path.basename(file.filename))  # root без расширения
+        download_name = f"{base[0]}_preds.csv"
+        # Можно FileResponse, он сам выставит заголовки, включая Content-Disposition filename
+        return FileResponse(
+            path=preds_path,
+            media_type="text/csv",
+            filename=download_name,
+            headers={"X-Whole-Time-Sec": str(whole_time)}
+        )  # [15][19][9]
+
+
+    finally:
+        # 6) Уборка
+        if os.path.exists(tmp_csv.name):
+            os.remove(tmp_csv.name)  # [

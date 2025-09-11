@@ -20,6 +20,6 @@ DEFAULT_BATCH = int(os.getenv("EMBED_BATCH", "64"))
 DEFAULT_MAXLEN = int(os.getenv("EMBED_MAXLEN", "512"))
 
 TRITON_PROTOCOL: Literal["http", "grpc"] = os.getenv("TRITON_PROTOCOL", "http")
-TRITON_URL: str = os.getenv("TRITON_URL", "http://localhost:8000")
+TRITON_URL: str = os.getenv("TRITON_URL", "triton:8001")
 CACHE_PATH = os.getenv("CACHE_PATH", None)
 E5_NAME = os.getenv("E5_NAME", "intfloat/multilingual-e5-small")
