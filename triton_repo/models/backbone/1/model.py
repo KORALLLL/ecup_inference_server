@@ -24,6 +24,12 @@ from transformers import AutoTokenizer, AutoModel
 from einops import rearrange, repeat
 from hyper_connections import HyperConnections
 
+torch.backends.cuda.matmul.allow_tf32 = True 
+torch.backends.cuda.enable_flash_sdp(True)
+torch.backends.cuda.enable_mem_efficient_sdp(True)
+torch.backends.cuda.enable_math_sdp(False)
+
+
 
 MODEL_NAME = "intfloat/multilingual-e5-small"
 MAX_LEN_TEXT = 512

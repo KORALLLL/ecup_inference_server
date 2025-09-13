@@ -19,7 +19,11 @@ from FlagEmbedding import BGEM3FlagModel
 import numpy as np
 import triton_python_backend_utils as pb_utils
 
+torch.backends.cuda.matmul.allow_tf32 = True 
 torch.backends.cuda.enable_flash_sdp(True)
+torch.backends.cuda.enable_mem_efficient_sdp(True)
+torch.backends.cuda.enable_math_sdp(False)
+
 
 
 class TritonPythonModel:
